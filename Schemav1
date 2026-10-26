@@ -1,0 +1,169 @@
+// ==========================================
+// USER SERVICE
+// ==========================================
+Table users {
+  user_id varchar [pk]
+  name varchar [not null]
+  email varchar [unique, not null]
+  password_hash varchar [not null]
+  role varchar [not null]
+  created_at timestamp [default: `CURRENT_TIMESTAMP`]
+}
+
+// ==========================================
+// TRAIN & INVENTORY SERVICE
+// ==========================================
+Table stations {
+  station_id varchar [pk]
+  station_code varchar [unique, not null, note: 'e.g., NDLS, CSMT']
+  station_name varchar [not null]
+  city varchar [not null]
+  state varchar [not null]
+  is_active boolean [default: true]
+}
+
+Table trains {
+  train_id varchar [pk]
+  train_number varchar [unique, not null]
+  source_station_id varchar [not null]
+  destination_station_id varchar [not null]
+}
+
+Table trips {
+  trip_id varchar [pk]
+  train_id varchar [not null]
+  departure_at timestamp [not null]
+  arrival_at timestamp [not null]
+  chart_prepared_at timestamp [note: 'Triggers waitlist auto-cancellation cutoff 4 hours prior']
+  status varchar [not null, note: 'SCHEDULED, COMPLETED, CANCELLED']
+  
+  indexes {
+    (train_id, departure_at) [unique, note: 'Prevents duplicate runs for the same scheduled time']
+  }
+}
+
+Table trip_classes {
+  class_id varchar [pk]
+  trip_id varchar [not null]
+  class_type varchar [not null, note: 'e.g., 1AC, SL']
+  fare decimal(12,2) [not null]
+  available_seats int [not null, note: 'Denormalized capacity counter']
+  available_waitlist int [not null, note: 'Tracks remaining waitlist capacity']
+
+  indexes {
+    (trip_id, class_type) [unique, note: 'Same class should not be defined twice for one trip']
+  }
+}
+
+Table trip_seats {
+  seat_id varchar [pk]
+  class_id varchar [not null]
+  seat_number varchar [not null]
+
+  indexes {
+    (class_id, seat_number) [unique, note: 'Prevents duplicate seat numbers within a class']
+  }
+}
+
+Table seat_assignments {
+  seat_id varchar [pk]
+  reservation_id varchar [not null]
+  ticket_id varchar [unique, note: 'Nullable during initial hold. Unique for active 1:1 mapping']
+  status varchar [not null, note: 'HELD, CONFIRMED']
+  hold_expires_at timestamp [note: 'Releases seat if booking/payment is abandoned']
+  version int [not null, default: 0, note: 'Optimistic locking (@Version) for high-concurrency grab']
+}
+
+// ==========================================
+// RESERVATION SERVICE
+// ==========================================
+Table reservations {
+  reservation_id varchar [pk]
+  user_id varchar [not null]
+  class_id varchar [not null]
+  pnr varchar(20) [unique, note: 'Nullable; generated only upon payment confirmation']
+  status varchar [not null, note: 'PENDING_PAYMENT, CONFIRMED, WAITLISTED, PARTIALLY_WAITLISTED, PARTIALLY_CANCELLED, CANCELLED']
+  total_amount decimal(12,2) [not null, note: 'Full upfront fare collected regardless of waitlist status']
+  created_at timestamp [default: `CURRENT_TIMESTAMP`]
+  confirmed_at timestamp
+}
+
+Table tickets {
+  ticket_id varchar [pk]
+  reservation_id varchar [not null]
+  passenger_name varchar [not null]
+  passenger_age int [not null]
+  passenger_gender varchar [not null]
+  seat_id varchar [note: 'Nullable during initial booking or if WAITLISTED. NOT unique (historical reuse)']
+  waitlist_sequence int [note: 'Nullable; FIFO order tracking for auto-upgrades']
+  fare_paid decimal(12,2) [not null]
+  status varchar [not null, note: 'PENDING, CONFIRMED, WAITLISTED, CANCELLED']
+  created_at timestamp [default: `CURRENT_TIMESTAMP`]
+}
+
+// ==========================================
+// CANCELLATION SERVICE
+// ==========================================
+Table cancellation_requests {
+  cancel_request_id varchar [pk]
+  reservation_id varchar [not null]
+  status varchar [not null, note: 'PENDING, COMPLETED, FAILED']
+  requested_at timestamp [default: `CURRENT_TIMESTAMP`]
+  completed_at timestamp
+}
+
+Table cancellation_items {
+  cancel_item_id varchar [pk]
+  cancel_request_id varchar [not null]
+  ticket_id varchar [not null]
+  refund_amount decimal(12,2) [not null]
+
+  indexes {
+    (cancel_request_id, ticket_id) [unique]
+  }
+}
+
+// ==========================================
+// PAYMENT SERVICE
+// ==========================================
+Table payments {
+  payment_id varchar [pk]
+  reservation_id varchar [not null]
+  cancel_request_id varchar [note: 'Nullable logical FK to cancellation_requests']
+  gateway_ref varchar [unique, note: 'Nullable; set once gateway provides its reference']
+  idempotency_key varchar [unique, not null]
+  amount decimal(12,2) [not null]
+  payment_type varchar [not null, note: 'CHARGE, REFUND']
+  status varchar [not null, note: 'INITIATED, SUCCESS, FAILED']
+  created_at timestamp [default: `CURRENT_TIMESTAMP`]
+  updated_at timestamp [default: `CURRENT_TIMESTAMP`]
+}
+
+// ==========================================
+// RELATIONSHIPS (FOREIGN KEYS)
+// ==========================================
+
+// Train & Inventory Service
+Ref: trains.source_station_id > stations.station_id
+Ref: trains.destination_station_id > stations.station_id
+Ref: trips.train_id > trains.train_id
+Ref: trip_classes.trip_id > trips.trip_id
+Ref: trip_seats.class_id > trip_classes.class_id
+Ref: seat_assignments.seat_id - trip_seats.seat_id
+
+// Reservation Service
+Ref: reservations.user_id > users.user_id
+Ref: reservations.class_id > trip_classes.class_id
+Ref: seat_assignments.reservation_id > reservations.reservation_id
+Ref: seat_assignments.ticket_id - tickets.ticket_id
+Ref: tickets.reservation_id > reservations.reservation_id
+Ref: tickets.seat_id > trip_seats.seat_id
+
+// Cancellation Service
+Ref: cancellation_requests.reservation_id > reservations.reservation_id
+Ref: cancellation_items.cancel_request_id > cancellation_requests.cancel_request_id
+Ref: cancellation_items.ticket_id > tickets.ticket_id
+
+// Payment Service
+Ref: payments.reservation_id > reservations.reservation_id
+Ref: payments.cancel_request_id > cancellation_requests.cancel_request_id
