@@ -1,0 +1,270 @@
+
+Project RailwayTicketBooking {
+  database_type: 'PostgreSQL'
+}
+
+// =====================================================
+// 1. USERS AND MASTER DATA
+// =====================================================
+
+Table users {
+  user_id varchar [pk]
+  name varchar [not null]
+  email varchar [unique, not null]
+  password_hash varchar [not null]
+  created_at timestamptz [not null, default: `now()`]
+}
+
+Table stations {
+  station_id varchar [pk]
+  station_code varchar [unique, not null]
+  name varchar [not null]
+  city varchar [not null]
+  state varchar [not null]
+}
+
+Table trains {
+  train_id varchar [pk]
+  train_number varchar [unique, not null]
+  name varchar [not null]
+  created_at timestamptz [not null, default: `now()`]
+}
+
+// Reusable master route for a train.
+
+Table train_stops {
+  train_stop_id varchar [pk]
+  train_id varchar [not null]
+  station_id varchar [not null]
+  stop_sequence int [not null]
+  distance_from_source int [not null]
+
+  indexes {
+    (train_id, stop_sequence) [unique]
+    (train_id, station_id, stop_sequence)
+  }
+}
+
+// =====================================================
+// 2. TRIPS AND SCHEDULES
+// =====================================================
+
+Table trips {
+  trip_id varchar [pk]
+  train_id varchar [not null]
+  departure_date date [not null]
+  status varchar [not null, note: 'SCHEDULED, ON_RUN, COMPLETED, CANCELLED']
+  chart_prepared_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (train_id, departure_date)
+  }
+}
+
+// Actual date-specific stop schedule.
+
+Table trip_stops {
+  trip_stop_id varchar [pk]
+  trip_id varchar [not null]
+  train_stop_id varchar [not null]
+  stop_sequence int [not null]
+  arrival_time timestamptz
+  departure_time timestamptz
+
+  indexes {
+    (trip_id, stop_sequence) [unique]
+    (trip_id, train_stop_id) [unique]
+  }
+}
+
+Table trip_classes {
+  class_id varchar [pk]
+  trip_id varchar [not null]
+  class_type varchar [not null, note: '1AC, 2AC, 3AC, SL, etc.']
+  total_capacity int [not null]
+  base_fare_per_km decimal(10,2) [not null]
+
+  indexes {
+    (trip_id, class_type) [unique]
+  }
+}
+
+Table trip_seats {
+  seat_id varchar [pk]
+  class_id varchar [not null]
+  coach_number varchar [not null]
+  seat_number varchar [not null]
+
+  indexes {
+    (class_id, coach_number, seat_number) [unique]
+  }
+}
+
+// Availability for each pair of consecutive stops.
+
+Table trip_segment_availabilities {
+  segment_id varchar [pk]
+  class_id varchar [not null]
+  from_stop_sequence int [not null]
+  to_stop_sequence int [not null]
+  available_seats int [not null]
+  available_waitlist int [not null]
+  version int [not null, default: 0]
+
+  indexes {
+    (class_id, from_stop_sequence) [unique]
+  }
+}
+
+// =====================================================
+// 3. RESERVATIONS AND TICKETS
+// =====================================================
+
+Table reservations {
+  reservation_id varchar [pk]
+  user_id varchar [not null]
+  trip_id varchar [not null]
+  pnr varchar(20) [unique]
+  status varchar [not null, note: 'PENDING_PAYMENT, CONFIRMED, PARTIALLY_CONFIRMED, WAITLISTED, PARTIALLY_CANCELLED, CANCELLED']
+  total_fare decimal(12,2) [not null, note: 'Original fare; do not decrease after cancellation']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, created_at)
+    (trip_id, status)
+  }
+}
+
+Table tickets {
+  ticket_id varchar [pk]
+  reservation_id varchar [not null]
+  class_id varchar [not null]
+  passenger_name varchar [not null]
+  passenger_age int [not null]
+  passenger_gender varchar [not null]
+
+  start_stop_sequence int [not null]
+  end_stop_sequence int [not null]
+
+  fare decimal(12,2) [not null]
+  status varchar [not null, note: 'HELD, CONFIRMED, WAITLISTED, CANCELLED']
+  waitlist_sequence bigint
+
+  // Cancellation details maintained on the ticket.
+  cancelled_at timestamptz
+  cancellation_reason varchar
+  cancellation_fee decimal(12,2) [not null, default: 0]
+  refund_amount decimal(12,2) [not null, default: 0]
+
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (class_id, waitlist_sequence)
+    (reservation_id, status)
+  }
+}
+
+// One mutable seat assignment per ticket.
+// Update the row when an assignment is released or changed.
+
+Table seat_assignments {
+  assignment_id varchar [pk]
+  seat_id varchar [not null]
+  ticket_id varchar [not null, unique]
+  start_stop_sequence int [not null]
+  end_stop_sequence int [not null]
+  status varchar [not null, note: 'HELD, CONFIRMED, RELEASED']
+  hold_expires_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (seat_id, status)
+  }
+}
+
+// =====================================================
+// 4. PAYMENTS
+// =====================================================
+
+Table payments {
+  payment_id varchar [pk]
+  reservation_id varchar [not null]
+
+  idempotency_key varchar [unique, not null]
+  gateway_tx_id varchar [unique]
+
+  amount decimal(12,2) [not null]
+  currency varchar(3) [not null, default: 'INR']
+  status varchar [not null, note: 'INITIATED, PENDING_CONFIRMATION, SUCCESS, FAILED']
+
+  created_at timestamptz [not null, default: `now()`]
+  completed_at timestamptz
+
+  indexes {
+    (reservation_id, status)
+  }
+}
+
+// One refund can cover multiple cancelled tickets.
+// Separate refund rows can represent separate cancellation events.
+
+Table refunds {
+  refund_id varchar [pk]
+  payment_id varchar [not null]
+  reservation_id varchar [not null]
+
+  idempotency_key varchar [unique, not null]
+  gateway_refund_id varchar [unique]
+
+  amount decimal(12,2) [not null]
+  status varchar [not null, note: 'INITIATED, PENDING_CONFIRMATION, SUCCESS, FAILED']
+  reason varchar [note: 'CUSTOMER_CANCELLATION, WAITLIST_CUTOFF, TRAIN_CANCELLED']
+
+  created_at timestamptz [not null, default: `now()`]
+  completed_at timestamptz
+
+  indexes {
+    (reservation_id, status)
+    (payment_id, status)
+  }
+}
+
+// =====================================================
+// 5. RELATIONSHIPS
+// =====================================================
+
+// Master route
+
+Ref: train_stops.train_id > trains.train_id
+Ref: train_stops.station_id > stations.station_id
+
+// Trips and schedules
+
+Ref: trips.train_id > trains.train_id
+Ref: trip_stops.trip_id > trips.trip_id
+Ref: trip_stops.train_stop_id > train_stops.train_stop_id
+
+// Classes and inventory
+
+Ref: trip_classes.trip_id > trips.trip_id
+Ref: trip_seats.class_id > trip_classes.class_id
+Ref: trip_segment_availabilities.class_id > trip_classes.class_id
+
+// Reservations and tickets
+
+Ref: reservations.user_id > users.user_id
+Ref: reservations.trip_id > trips.trip_id
+Ref: tickets.reservation_id > reservations.reservation_id
+Ref: tickets.class_id > trip_classes.class_id
+
+// Seat assignments
+
+Ref: seat_assignments.seat_id > trip_seats.seat_id
+Ref: seat_assignments.ticket_id - tickets.ticket_id
+
+// Payments and aggregate refunds
+
+Ref: payments.reservation_id > reservations.reservation_id
+Ref: refunds.payment_id > payments.payment_id
+Ref: refunds.reservation_id > reservations.reservation_id
